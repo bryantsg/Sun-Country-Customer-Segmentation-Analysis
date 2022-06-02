@@ -1,0 +1,451 @@
+---
+title: "HW2 EDA"
+author: "Zhanglin Shangguan"
+date: "2022/2/10"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+### Data Cleaning
+
+```{r}
+setwd('C:/Users/SGZL/Desktop/Exploratory Analytics/SunCountry_data')
+library(dplyr)
+library(tidyr)
+library(cluster)
+library(clustMixType)
+library(ggplot2)
+library(lubridate)
+
+df <- read.csv('SunCountry.csv')
+
+## Filtering out extreme age groups, ungendered groups
+## The Airlines with which booking was made is SY
+## Combining UflyMemberStatus and CardHolder together to create new column Status
+df <- df %>%
+  filter(Age > 0 & Age < 110 & MarketingAirlineCode == "SY" & GenderCode != "U") %>% 
+  unite("Status", UflyMemberStatus:CardHolder, remove = TRUE)
+
+## Categorize Status into 5 groups
+df$Status[which(df$Status == "_")] = "Non-Member"
+df$Status[which(df$Status == "Standard_false")] = "Standard"
+df$Status[which(df$Status == "Standard_true")] = "Standard Carholder"
+df$Status[which(df$Status == "Elite_false")] = "Elite"
+df$Status[which(df$Status == "Elite_true")] = "Elite Cardholder"
+
+
+df <- df %>%
+  mutate(EnrollDate = ymd_hms(EnrollDate), ServiceStartDate = ymd(ServiceStartDate), 
+         PNRCreateDate = ymd(PNRCreateDate)) %>% # Convert dates into date format
+  mutate(EnrollDate = floor_date(EnrollDate, "day")) %>% #Convert datetime into date format
+  # The number of days of memebership before the flight
+  mutate(memebership_duration_before_flight = difftime(ServiceStartDate, EnrollDate, units = "days"),
+         # How many days in advance that customer booked their trip before traveling
+         Daysinadvance_booked_flight = difftime(ServiceStartDate, PNRCreateDate, units = "days")) %>%
+  #The month and the day of the week of flight, 1 is Sunday for day_of_week_flight
+  mutate(month_flight = month(ServiceStartDate), day_of_week_flight = wday(ServiceStartDate, abbr = FALSE)) %>%
+  # If customer have discounts, 0 - no discount, 1 - disount
+  mutate(discount = if_else(BookedProduct == "", 0, 1)) %>%
+  # Creating Stoppover column to indicate the duration
+  mutate(Stopover = case_when(
+    StopoverCode == "" ~ "Direct Flight",
+    StopoverCode == "O" ~ "Layovers",
+    StopoverCode == "X" ~ "24hrs Stopover")) %>%
+  # unique Id
+  unite("Unique_ID", c(EncryptedName, birthdateid, TicketNum) ,remove = FALSE)
+
+
+```
+
+```{r}
+df %>%
+  filter(Unique_ID == "41414B48555344696420493F7C206765742074686973207269676874414C4C49534F4E20414E4E_55353_3372107204347")
+```
+
+
+```{r}
+#Frequqent Flyer
+
+df1 = df %>% 
+  group_by(Unique_ID) %>% 
+  dplyr::summarise(countv = n())
+
+#df2 = df1%>% order_by(countv, desc)
+#
+
+library(plyr)
+df <- join(df, df1,type = "left", by ="Unique_ID")
+
+## define frequent flyer
+df <- df%>%  mutate(
+      FrequentFlyer =
+      case_when(
+        countv >= 3 ~ "Frequent Flyer",
+        TRUE ~ " Not Frequent Flyer")
+      )
+
+```
+
+#### Converting variables into factors
+```{r}
+df$GenderCode = factor(df$GenderCode)
+df$TrvldClassOfService = factor(df$TrvldClassOfService)
+df$BookingChannel = factor(df$BookingChannel)
+df$BkdClassOfService = factor(df$BkdClassOfService)
+df$Stopover = factor(df$Stopover)
+df$Status = factor(df$Status)
+df$month_flight = factor(df$month_flight)
+df$FrequentFlyer = factor(df$FrequentFlyer)
+```
+
+
+### EDA
+
+```{r}
+df %>%
+  group_by(TrvldClassOfService) %>%
+  dplyr::summarise(Avg_age = mean(Age)) %>%
+  ggplot(aes(x = TrvldClassOfService, y = Avg_age)) + 
+  geom_bar(stat = 'identity') + ylab("Average Age")
+```
+### T-test to test there is significant age difference between one who travel first class and coach. The results has shown that there is a significant difference between the age for Coach Class and First Class travelers.
+
+```{r}
+df_t <- df
+df_t$TrvldClassOfService[which(df_t$TrvldClassOfService == "Discount First Class")] = "First Class"
+
+t.test(Age ~ TrvldClassOfService, data = df_t)
+
+```
+
+### Check the distribution of top 4 most popular booking channel. 
+
+```{r}
+df %>%
+  dplyr::count(BookingChannel) %>%
+  arrange(desc(n)) %>%
+  head(4) %>%
+  ggplot(aes(x = BookingChannel, y = n)) + geom_bar(stat = 'identity') +
+  xlab('Booking Chaneel')
+  
+  
+```
+
+### Fist class break down to study the demographic who often purchase first class
+```{r}
+
+df_ages = df %>% mutate(Age_disc = ifelse(Age <= 30, "Young", 
+                           ifelse(Age > 30 & Age <=50,"Middle Age", "Old")))
+
+ggplot(df_ages %>% 
+         filter(TrvldClassOfService != 'Coach') %>% 
+         group_by(Age_disc, TrvldClassOfService, GenderCode) %>% 
+         dplyr::summarise(count = n()), aes(x=TrvldClassOfService, y=count, 
+                                     groups=Age_disc, fill=Age_disc)) +                          geom_bar(stat='identity', position='dodge')  + 
+         labs(title="First Class Breakdown by Gender and Age", 
+              x="Class", y="Number of Flights", fill='Age Groups') +  
+         facet_wrap(GenderCode~.)
+```
+
+
+```{r}
+df_freq1 = df %>% group_by(discount, BkdClassOfService) %>% dplyr::summarise(discount1 = n())
+df_freq1
+p1 <- ggplot(df_freq1%>%filter(BkdClassOfService == "Coach"), aes(fill=factor(discount), x=BkdClassOfService, y = discount1)) +
+    geom_bar(position="dodge", stat="identity")
+p2 <- ggplot(df_freq1%>%filter(BkdClassOfService == "Discount First Class"), aes(fill=factor(discount), x=BkdClassOfService, y = discount1)) +
+    geom_bar(position="dodge", stat="identity")
+p3 <- ggplot(df_freq1%>%filter(BkdClassOfService == "First Class"), aes(fill=factor(discount), x=BkdClassOfService, y = discount1)) +
+    geom_bar(position="dodge", stat="identity")
+#df_freq[df_freq$Status == "Elite"]
+```
+
+
+
+```{r}
+## We had to change plotly as it does not support pdf
+##library(plotly)
+##subplot(ggplotly(p1), ggplotly(p2), ggplotly(p3),nrows = 1)
+require(gridExtra)
+par(mfrow=c(1,3))
+p1
+p2
+p3
+```
+
+
+
+### Kprototype Clustering for segementing customers
+```{r}
+library(clustMixType)
+```
+
+
+```{r}
+normalize <- function(x){
+  return ((x - min(x))/(max(x) - min(x)))}
+
+set.seed(1000)
+
+df_sample <- df %>%
+  mutate(Daysinadvance_booked_flight = as.numeric(Daysinadvance_booked_flight)) %>%
+  select("GenderCode", "Age", "TrvldClassOfService",
+         "BaseFareAmt", "Status", "FrequentFlyer", "month_flight") %>%
+  filter(BaseFareAmt != 0) %>%
+  sample_n(30000, replace = FALSE) %>%
+  mutate(BaseFareAmt_scaled = normalize(BaseFareAmt)) %>%
+  mutate(Age_scaled = normalize(Age))
+```
+
+
+### Selecting clsutering features and perfom random sampling of 40000 records.
+```{r}
+normalize <- function(x){
+  return ((x - min(x))/(max(x) - min(x)))}
+
+set.seed(1000)
+
+df_sample1 <- df %>%
+  mutate(Daysinadvance_booked_flight = as.numeric(Daysinadvance_booked_flight)) %>%
+  mutate(BaseFareAmt_scaled = normalize(BaseFareAmt)) %>%
+  mutate(Age_scaled = normalize(Age)) %>%
+  filter(BaseFareAmt != 0) %>%
+  sample_n(40000, replace = FALSE)
+
+df_sample1_use <- df_sample1 %>%
+  select("GenderCode", "Age_scaled", "TrvldClassOfService",
+         "BaseFareAmt_scaled", "Status", "FrequentFlyer", "month_flight")
+```
+
+### Descriptive statistics for the sample
+```{r}
+summary(df_sample1_use)
+```
+
+
+### Picking the number of clusters based on SSE, we pick 5.
+```{r}
+set.seed(9845)
+SSE_curve <- c()
+for (k in 1:8){
+  kpro <- kproto(df_sample1_use, k)
+  sse <- sum(kpro$withinss)
+  SSE_curve[k] <- sse
+}
+
+plot(1:8, SSE_curve, type="b", xlab="Number of Clusters", ylab="SSE")
+
+```
+
+### Running clustering model
+```{r}
+set.seed(1000)
+sy_kproto <- df_sample1_use %>%
+  clustMixType::kproto(k = 4, nstart = 30)
+```
+
+
+```{r}
+df_sample1_use_temp <- df_sample1 %>%
+  select("GenderCode", "Age", "TrvldClassOfService",
+         "BaseFareAmt", "Status", "FrequentFlyer", "month_flight")
+
+
+df_sample1_use_temp <- 
+  df_sample1_use_temp %>%
+  mutate(kproto_cluster = sy_kproto$cluster)
+table(df_sample1_use_temp$kproto_cluster)
+```
+
+Clustering plots
+```{r}
+clprofiles(sy_kproto, df_sample1_use_temp)
+```
+
+```{r}
+summary(sy_kproto)
+```
+
+## Popular Destination
+### For popular destination, we take out MSP from the visulization beucase it is
+### obvious that MSP has the largest amount of traffic.
+
+Cluster 1
+```{r}
+C1 <- df %>%
+  filter(GenderCode == "M" & Status != "Non-Member") %>%
+  filter(Age > 30 & Age < 50) %>%
+  filter(month_flight == 3 | month_flight == 2) %>% 
+  group_by(ServiceEndCity) %>% 
+  dplyr::summarise(count = n(), .groups = 'drop') %>%
+  arrange(desc(count)) %>%
+  head(7)
+
+```
+
+### Top destinations for this cluster
+```{r}
+ggplot(C1 %>% 
+         filter(ServiceEndCity != 'MSP'), 
+         aes(x = reorder(ServiceEndCity, -count), y = count)) + 
+         geom_bar(stat = "summary", position="dodge") + 
+         labs(title="Top 6 Destinations for Cluster 1", 
+         x=" Destination Airport", y="Count of flights") 
+```
+
+
+Cluster 2
+```{r}
+df$discount = factor(df$discount)
+
+C2 <- df %>%
+  filter(GenderCode == "F" & Status == "Non-Member" & Age < 30) %>%
+  filter( month_flight == 7) %>% 
+  group_by(ServiceEndCity) %>% 
+  dplyr::summarise(count = n()) %>% 
+  arrange(desc(count)) %>%
+  head(7)
+C2
+```
+### Top destinations for this cluster
+```{r}
+
+ggplot(C2 %>% 
+         filter(ServiceEndCity != 'MSP'), 
+         aes(x = reorder(ServiceEndCity, -count), y = count)) + 
+         geom_bar(stat = "summary", position="dodge") + 
+         labs(title="Top 6 Destinations for Cluster 2", 
+              x=" Destination Airport", y="Count of flights") +  
+         scale_x_discrete(guide = guide_axis(n.dodge=1)) +
+         ylim(c(0,6000))
+```
+
+
+
+Cluster 3
+```{r}
+
+C3 <- df %>%
+  filter(GenderCode == "F" & Status != "Non-Member") %>%
+  filter(Age > 30 & Age < 50) %>%
+  filter(month_flight == 12) %>% 
+  group_by(ServiceEndCity) %>% 
+  dplyr::summarise(count = n(), .groups = 'drop') %>%
+  arrange(desc(count)) %>%
+  head(7)
+
+```
+
+
+### Top destinations for this cluster
+```{r}
+ggplot(C3 %>% 
+         filter(ServiceEndCity != 'MSP'),
+         aes(x = reorder(ServiceEndCity, -count), y = count)) + 
+         geom_bar(stat = "summary", position="dodge") + 
+         labs(title="Top 6 Destinations for Cluster 3", 
+         x=" Destination Airport", y="Count of flights") +  
+         ylim(c(0,600))
+
+```
+
+Cluster 4
+```{r}
+C4 <- df %>%
+  filter(GenderCode == "M" & Status != "Non-Member") %>%
+  filter(Age < 30) %>%
+  filter(month_flight == 8) %>% 
+  group_by(ServiceEndCity) %>% 
+  dplyr::summarise(count = n(), .groups = 'drop') %>%
+  arrange(desc(count)) %>%
+  head(7)
+```
+
+### Top destinations for this cluster
+```{r}
+ggplot(C4 %>% 
+         filter(ServiceEndCity != 'MSP'), 
+         aes(x = reorder(ServiceEndCity, -count), y = count)) + 
+         geom_bar(stat = "summary", position="dodge") + 
+         labs(title="Top 10 Destinations for Cluster 4", 
+         x=" Destination Airport", y="Count of flights") +  
+         ylim(c(0,500))
+```
+
+
+## Website Analysis 
+```{r}
+df=df%>%unite("Unique_ID", EncryptedName:birthdateid, remove = FALSE)
+df$GenderCode=as.factor(df$GenderCode)
+df$BookingChannel=as.factor(df$BookingChannel)
+df$Status=as.factor(df$Status)
+df$TrvldClassOfService=as.factor(df$TrvldClassOfService)
+df$Stopover=as.factor(df$Stopover)
+df$Daysinadvance_booked_flight=as.numeric(df$Daysinadvance_booked_flight)
+df$memebership_duration_before_flight=as.numeric(df$memebership_duration_before_flight)
+options(scipen = 100)
+
+
+```
+
+
+```{r}
+set.seed(5)
+df_web<-df%>%filter(BookingChannel=="SCA Website Booking")
+df_web<-df_web%>%sample_n(15000,replace=FALSE)
+df_cluster=df_web%>%select(Unique_ID,Age,TrvldClassOfService,Daysinadvance_booked_flight)
+glimpse(df_cluster)
+```
+
+```{r}
+library(ISLR) # for college dataset
+library(cluster) # for similarity and pam
+library(Rtsne) # for t-SNE plot
+library(ggplot2) # for visualization
+library(clustMixType) #for kprototypes
+## calculating gower distance
+gower_dist <- daisy(df_cluster[, -1],
+                    metric = "gower",
+                    type = list(logratio = 3))
+summary(gower_dist)
+gower_mat <- as.matrix(gower_dist)
+```
+
+```{r}
+# to determine proper k value
+sil_curve <- c()
+for (k in 2:10) {
+  pam_fit <- pam(gower_dist, diss = TRUE,k = k)
+  #PAM interally computes the silhouette measure
+  sil_curve[k] <- pam_fit$silinfo$avg.width
+}
+sil_curve = sil_curve[2:10]
+plot(2:10, sil_curve, type="b", xlab="Number of Clusters", ylab="Silhouette")
+num_pam_clusters = which.max(sil_curve)+1
+```
+
+### K-mediods clustering
+```{r pam-sum}
+pam_fit <- pam(gower_dist, diss = TRUE, k =5)
+
+pam_results <- df_cluster %>%
+  mutate(cluster = pam_fit$clustering) %>%
+  group_by(cluster) %>%
+  do(the_summary = summary(.))
+
+### clustering result summary
+pam_results$the_summary
+```
+
+### clustering results 
+```{r}
+pam_results
+```
+
+### #the size of each cluster
+```{r}
+
+dfM=df_cluster[pam_fit$medoids, ]
+dfM
+```
